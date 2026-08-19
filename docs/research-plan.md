@@ -23,6 +23,7 @@ Create a distributable Pi extension that lets a parent agent spawn multiple suba
 7. Keep child agents from recursively spawning an unbounded fleet unless recursion is explicitly designed and bounded.
 8. Provide tests for command orchestration, result extraction, concurrency-safe state, cancellation, timeout, and fallback behavior.
 9. Package the result as a Pi package with clear installation and development instructions.
+10. Preserve normal Herdr sound notifications for the parent and unrelated agents while suppressing child-agent completion beeps.
 
 ## Research checklist
 
@@ -65,8 +66,8 @@ When `HERDR_ENV=1`, require the injected workspace context and use the installed
 1. `herdr tab create --workspace $HERDR_WORKSPACE_ID --cwd ... --label ... --env ... --no-focus`.
 2. Parse `root_pane.pane_id` and `root_pane.tab_id`; never derive ids.
 3. `herdr agent start <unique-name> --kind pi --pane <id> --timeout ... -- <pi-args>`.
-4. `herdr agent prompt <pane-id> <task> --wait --timeout ...`.
-5. Collect from the child result protocol, retain or close the tab according to `keepTabs`.
+4. Submit with `herdr agent prompt <pane-id> <task>` without Herdr's settled-state wait.
+5. Wait on the child result protocol, then retain or close the tab according to `keepTabs`.
 
 A failed/aborted/timed-out run closes its half-created tab. A Herdr-present failure does not silently fall back, because that would violate the promised visible-tab topology.
 
@@ -82,15 +83,16 @@ Do not scrape terminal output. Every child receives:
 - a private `HERDR_SUBAGENT_RESULT_FILE` path under a mode-0700 temp directory;
 - this extension explicitly via `--extension`, ensuring the child hook is present in both installed and development runs.
 
-In child mode the extension does not expose the delegation tool (a recursion guard). It appends concise child instructions in `before_agent_start`. On `agent_settled`, it extracts the final assistant text from the child's own session branch and atomically writes a versioned JSON result file with summary/error/usage metadata. The parent retries briefly for write-order races and caps model-visible summary bytes. For retained Herdr children, the extension keeps the private result path in memory, removes the stale result before each follow-up, rejects results timestamped before that follow-up, and reuses the same settled-result protocol; the child's atomic writer recreates the private directory when needed. This combines the reference project's reliable parent-side collection principle with a package-owned machine-readable channel that also works for ephemeral local children.
+In child mode the extension does not expose the delegation tool (a recursion guard). It appends concise child instructions in `before_agent_start`. On `agent_settled`, it extracts the final assistant text from the child's own session branch and atomically writes a versioned JSON result file with summary/error/usage metadata. Herdr parents poll that channel directly up to the task deadline rather than waiting for Herdr's `done` state; local parents retain the short process-exit race retry. Model-visible summary bytes are capped. For retained Herdr children, the extension keeps the private result path in memory, removes the stale result before each follow-up, rejects results timestamped before that follow-up, and reuses the same settled-result protocol; the child's atomic writer recreates the private directory when needed. This combines the reference project's reliable parent-side collection principle with a package-owned machine-readable channel that also works for ephemeral local children.
 
 ### Inheritance and isolation
 
 Children inherit the parent's active `provider/model` and thinking level through CLI flags; credentials and normal Pi configuration remain process-level and are never copied into prompts. A task may override the inherited thinking level with `effort: "low" | "medium" | "high"`; the extension translates this directly to Pi's `--thinking` flag for both local and Herdr children (`medium`, not `mid`). Each child has an isolated Pi session/context but shares the selected working directory. Concurrent write tasks can conflict, so tool guidance recommends parallel delegation for independent/research work and requires callers to separate editing scopes. Worktree creation is intentionally out of scope for v1.
 
-### State, UI, and cleanup
+### State, UI, notifications, and cleanup
 
 - Keep an in-memory fleet map only for tabs this extension created; `prompt`, `list`, and `close` never operate on unrelated tabs.
+- Herdr 0.8.0 has no per-agent-instance notification mute (`agent start --no-notify` and an equivalent API field do not exist). For child tabs only, pass `HERDR_SUBAGENT_SILENT=1`; the child claims sequenced Pi lifecycle authority, reports `working` before each run, atomically writes its result on settlement, then reports `unknown` rather than Herdr's sound-producing `idle`/`done` transition. The parent waits on the result channel, and the extension's `✅`/`❌` tab marker remains the completion indicator. If the final report fails, release authority so native Pi detection can recover instead of leaving stale `working` state. Herdr children use `--no-extensions` plus this package's explicit `--extension` to prevent another discovered lifecycle integration from racing in an `idle` report. This is a scoped compatibility workaround until Herdr exposes first-class per-instance muting; it does not modify global config or mute the parent.
 - Track which retained tabs reached a reusable idle state and reject overlapping prompts to the same child. Local subprocess children cannot be re-prompted after exit.
 - Stream compact aggregate progress through `onUpdate` and custom tool rendering.
 - Forward tool cancellation and per-task deadlines to child processes.
@@ -125,6 +127,7 @@ Children inherit the parent's active `provider/model` and thinking level through
 - [x] Finalize README and this work log with validation evidence and limitations.
 - [x] Add per-task low/medium/high effort overrides, tests, and documentation.
 - [x] Add retained-child follow-up prompting, result recollection, tests, and documentation.
+- [x] Add child-only Herdr sound suppression, fallback cleanup, tests, and documentation.
 
 ## Work log
 
@@ -146,3 +149,5 @@ Children inherit the parent's active `provider/model` and thinking level through
 - Implemented the per-task `effort` schema and dispatch override for both local subprocess and Herdr-tab children. Updated prompt guidance and README examples, and verified explicit overrides plus inherited parent levels in both backends. Validation: `npm run check` passes strict TypeScript and all 23 tests across 5 files.
 - Requested enhancement: allow the parent to re-prompt a successfully retained Herdr child later while preserving that child's existing Pi session context. The follow-up must target only an owned reusable tab, serialize per child, clear stale result data, wait for settlement, and return the new summary. Local children remain one-shot because their processes exit.
 - Implemented `action=prompt` with owned-tab validation, explicit reusable fleet state, same-agent `herdr agent prompt --wait`, stale-result removal, atomic result recollection, transcript fallback, parent/child title markers, overlap rejection, and bounded cleanup when a follow-up leaves agent state uncertain. README and tool guidance now document the lifecycle. Validation: strict TypeScript and all 25 tests across 5 files pass, including same-pane reuse without another tab/agent, inherited result-channel recreation, stale-result freshness checks, concurrent prompt rejection, local-backend refusal, follow-up timeout cleanup, and unowned-tab refusal.
+- Requested enhancement: Herdr may keep normal interactive-agent sound notifications enabled, but orchestrated child completion must not beep once per child. Research against installed Herdr 0.8.0, its CLI/API schema, default config, and current documentation confirmed only global and per-kind sound controls; there is no per-instance mute. Initial probing showed that disguising Pi as the default-muted `droid` kind is not stable because native Pi detection reclaims the pane and can still produce `done`; that approach was discarded.
+- Implemented child-only quiet lifecycle authority instead: extension-created Herdr children report sequenced `pi/working`, write their atomic result, then report `pi/unknown`, which avoids the sound-producing `working -> idle/done` path. Parent orchestration now submits without `--wait` and polls the result channel to the configured deadline. Herdr children disable discovered extensions while explicitly loading this package so another lifecycle reporter cannot race in `idle`; failure to publish the quiet final state releases authority back to native detection. Unit coverage verifies env propagation, sequencing, result-before-settle order, authority release, no-wait orchestration, and missing-result timeout cleanup. Validation: `npm run check` passes strict TypeScript and all 28 tests. Real no-focus Herdr smoke runs returned atomic summaries while remaining `agent=pi, agent_status=unknown`; a retained same-pane follow-up also preserved context (`amber`) and returned another atomic result. All smoke tabs were closed.

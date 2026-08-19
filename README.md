@@ -141,13 +141,19 @@ For every task, the extension:
 2. passes `--no-focus` so it does not steal the user's focus;
 3. polls `herdr pane process-info` until the shell owns the foreground process group;
 4. starts Pi through `herdr agent start`, retrying a remaining shell-busy race within the same readiness deadline;
-5. submits the task through `herdr agent prompt --wait`;
-6. collects the final summary over a private result-file protocol;
+5. submits the task through `herdr agent prompt` without Herdr's completion-state wait;
+6. waits for the final summary over a private result-file protocol;
 7. renames a successful tab to `✅ <label>` and keeps it by default for inspection or follow-up work.
 
 For `action=prompt`, the retained tab returns to `⏳` while the same agent handles the follow-up, then to `✅` or `❌` when it settles. An operational follow-up failure, timeout, or abort triggers bounded automatic cleanup because the agent's idle state may be uncertain; if cleanup fails, the tab remains owned with failed status so `close` can retry.
 
 Failed tabs are marked `❌` before automatic cleanup. Title markers are cosmetic and best-effort: a rename failure never changes the task result.
+
+### Child sound suppression
+
+Herdr 0.8 does not expose per-agent-instance sound muting. To avoid one completion beep per supervised child without muting the parent or changing global Herdr config, Herdr children report `working` while running and `unknown` after writing their result instead of entering Herdr's sound-producing `done` state. The parent waits on the result file, so `✅`/`❌` and `action=list` remain the authoritative child status. Seeing `agent_status: unknown` for a retained, `✅` child is therefore expected.
+
+Herdr children start with `--no-extensions` and explicitly load this package. This prevents another discovered lifecycle extension from reporting `idle` and reintroducing the sound; it also means other globally discovered Pi extensions are not available inside Herdr children. Built-in Pi tools and this package's child hook remain available. If quiet lifecycle reporting fails, the child releases authority back to native Herdr detection rather than leaving stale `working` state.
 
 Use `action=close` after consuming the summaries. Set `keepTabs: false` to close successful tabs immediately. Failed, timed-out, and aborted children are closed automatically. If bounded cleanup itself fails, the tab remains in the owned fleet with `failed` status so `list`/`close` can retry it.
 
@@ -159,9 +165,10 @@ Children receive a private result path and this extension explicitly on their Pi
 
 - does **not** register `subagent`, preventing accidental recursive fleets;
 - appends instructions requesting a concise final summary;
-- writes the final assistant response atomically on `agent_settled`.
+- writes the final assistant response atomically on `agent_settled`;
+- publishes the quiet `unknown` lifecycle state only after that write completes.
 
-The parent never scrapes terminal output. For Herdr children, a Pi session transcript is used as a fallback if the result-file write races or fails. Before a retained child receives a follow-up, the parent clears its stale result and collects the next atomic settled result through the same private channel. Local JSON events are the equivalent fallback outside Herdr.
+The parent never scrapes terminal output. For Herdr children, it polls the result channel up to the configured task deadline; a Pi session transcript remains a fallback when Herdr exposes one. Before a retained child receives a follow-up, the parent clears its stale result and collects the next atomic settled result through the same private channel. Local JSON events are the equivalent fallback outside Herdr.
 
 ## Model and working directory
 

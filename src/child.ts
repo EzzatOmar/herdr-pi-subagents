@@ -1,10 +1,15 @@
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { runProcess, type ProcessRunner } from "./process.ts";
 import type { ChildResultFile } from "./types.ts";
 
 export const CHILD_GATE_ENV = "HERDR_SUBAGENT";
 export const CHILD_RESULT_ENV = "HERDR_SUBAGENT_RESULT_FILE";
+export const CHILD_SILENT_ENV = "HERDR_SUBAGENT_SILENT";
+
+const SILENT_AGENT = "pi";
+const SILENT_AGENT_SOURCE = "herdr-pi-subagents:silent";
 
 export const CHILD_INSTRUCTIONS = `You are an isolated subagent working for a parent Pi session.
 Complete only the delegated task. Work autonomously and do not delegate to more agents.
@@ -136,19 +141,118 @@ function resultFromContext(ctx: ExtensionContext): ChildResultFile {
   };
 }
 
-export function registerChildMode(pi: ExtensionAPI, resultPath: string | undefined): void {
-  pi.on("before_agent_start", (event) => ({
-    systemPrompt: event.systemPrompt ? `${event.systemPrompt}\n\n${CHILD_INSTRUCTIONS}` : CHILD_INSTRUCTIONS,
-  }));
+interface ChildModeOptions {
+  env?: NodeJS.ProcessEnv;
+  runner?: ProcessRunner;
+}
 
-  if (!resultPath) return;
-  pi.on("agent_settled", async (_event, ctx) => {
+class SilentHerdrLifecycle {
+  private active = false;
+  private reportSeq = Date.now() * 1_000;
+
+  constructor(
+    private readonly paneId: string,
+    private readonly binary: string,
+    private readonly env: NodeJS.ProcessEnv,
+    private readonly runner: ProcessRunner,
+  ) {}
+
+  private async call(args: string[]): Promise<boolean> {
     try {
-      await writeChildResult(resultPath, resultFromContext(ctx));
-    } catch (error) {
-      process.stderr.write(
-        `herdr-pi-subagents: failed to write child result: ${error instanceof Error ? error.message : String(error)}\n`,
-      );
+      const output = await this.runner({
+        command: this.binary,
+        args,
+        env: { ...this.env },
+        timeoutMs: 2_000,
+      });
+      return output.code === 0 && !output.aborted && !output.timedOut && !output.spawnError;
+    } catch {
+      return false;
     }
+  }
+
+  private stateArgs(state: "working" | "unknown"): string[] {
+    this.reportSeq += 1;
+    return [
+      "pane",
+      "report-agent",
+      this.paneId,
+      "--source",
+      SILENT_AGENT_SOURCE,
+      "--agent",
+      SILENT_AGENT,
+      "--state",
+      state,
+      "--seq",
+      String(this.reportSeq),
+    ];
+  }
+
+  async working(): Promise<void> {
+    if (await this.call(this.stateArgs("working"))) this.active = true;
+  }
+
+  async settled(): Promise<void> {
+    if (!this.active) return;
+    // Herdr only emits completion sound for the working -> idle/done path.
+    // The parent collects the result file directly, so a supervised child can
+    // settle as unknown without generating human-attention noise.
+    if (await this.call(this.stateArgs("unknown"))) return;
+
+    // Never leave a child permanently under stale lifecycle authority if the
+    // final report fails. Native Pi detection is the safe fallback.
+    this.active = false;
+    this.reportSeq += 1;
+    await this.call([
+      "pane",
+      "release-agent",
+      this.paneId,
+      "--source",
+      SILENT_AGENT_SOURCE,
+      "--agent",
+      SILENT_AGENT,
+      "--seq",
+      String(this.reportSeq),
+    ]);
+    process.stderr.write("herdr-pi-subagents: silent lifecycle report failed; restored native Herdr detection\n");
+  }
+}
+
+function createSilentLifecycle(options: ChildModeOptions): SilentHerdrLifecycle | undefined {
+  const env = options.env ?? process.env;
+  if (env[CHILD_SILENT_ENV] !== "1" || env.HERDR_ENV !== "1" || !env.HERDR_PANE_ID) return undefined;
+  return new SilentHerdrLifecycle(
+    env.HERDR_PANE_ID,
+    env.HERDR_BIN || env.HERDR_BIN_PATH || "herdr",
+    env,
+    options.runner ?? runProcess,
+  );
+}
+
+export function registerChildMode(
+  pi: ExtensionAPI,
+  resultPath: string | undefined,
+  options: ChildModeOptions = {},
+): void {
+  const silentLifecycle = createSilentLifecycle(options);
+
+  pi.on("before_agent_start", async (event) => {
+    await silentLifecycle?.working();
+    return {
+      systemPrompt: event.systemPrompt ? `${event.systemPrompt}\n\n${CHILD_INSTRUCTIONS}` : CHILD_INSTRUCTIONS,
+    };
+  });
+
+  pi.on("agent_settled", async (_event, ctx) => {
+    if (resultPath) {
+      try {
+        await writeChildResult(resultPath, resultFromContext(ctx));
+      } catch (error) {
+        process.stderr.write(
+          `herdr-pi-subagents: failed to write child result: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      }
+    }
+    await silentLifecycle?.settled();
   });
 }

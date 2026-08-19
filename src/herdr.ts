@@ -353,19 +353,14 @@ export class HerdrClient {
     prompt: string;
     timeoutMs: number;
     signal?: AbortSignal;
+    wait?: boolean;
   }): Promise<HerdrAgentSnapshot> {
+    const args = ["agent", "prompt", input.paneId, input.prompt];
+    if (input.wait !== false) args.push("--wait", "--timeout", String(input.timeoutMs));
     const result = await this.call<AgentPayload>(
       "agent prompt",
-      [
-        "agent",
-        "prompt",
-        input.paneId,
-        input.prompt,
-        "--wait",
-        "--timeout",
-        String(input.timeoutMs),
-      ],
-      { signal: input.signal, timeoutMs: input.timeoutMs + 5_000 },
+      args,
+      { signal: input.signal, timeoutMs: input.wait === false ? 10_000 : input.timeoutMs + 5_000 },
     );
     if (!result.agent) throw new HerdrCommandError("agent prompt", "response omitted agent");
     return result.agent;

@@ -187,8 +187,12 @@ describe("Herdr orchestration", () => {
       expect(args).toContain("--no-focus");
       expect(args).toContain("w9");
       expect(args[args.indexOf("--label") + 1]).toMatch(/^⏳ /u);
+      expect(args).toContain("HERDR_SUBAGENT_SILENT=1");
     }
     const starts = calls.filter((args) => args[0] === "agent" && args[1] === "start");
+    for (const args of starts) expect(args).toContain("--no-extensions");
+    const prompts = calls.filter((args) => args[0] === "agent" && args[1] === "prompt");
+    for (const args of prompts) expect(args).not.toContain("--wait");
     const effortFor = (label: string) => {
       const args = starts.find((candidate) => candidate[candidate.indexOf("--name") + 1] === label)!;
       return args[args.indexOf("--thinking") + 1];
@@ -326,6 +330,48 @@ describe("Herdr orchestration", () => {
     expect(orchestrator.listFleet()).toEqual([
       expect.objectContaining({ tabId: "w1:t9", paneId: "w1:p9", status: "failed", reusable: false }),
     ]);
+  });
+
+  it("times out and closes a child that never publishes its result", async () => {
+    const calls: string[][] = [];
+    const runner: ProcessRunner = async (request) => {
+      calls.push(request.args);
+      const [group, action] = request.args;
+      if (group === "tab" && action === "list") return output(JSON.stringify({ result: { tabs: [] } }));
+      if (group === "tab" && action === "create") {
+        return output(JSON.stringify({ result: { root_pane: { pane_id: "w1:p2", tab_id: "w1:t2" } } }));
+      }
+      if (group === "pane" && action === "process-info") {
+        return output(JSON.stringify({ result: { process_info: { shell_pid: 100, foreground_process_group_id: 100 } } }));
+      }
+      if (group === "agent" && action === "start") {
+        return output(JSON.stringify({ result: { agent: { pane_id: "w1:p2", agent_status: "idle" } } }));
+      }
+      if (group === "agent" && (action === "prompt" || action === "get")) {
+        return output(JSON.stringify({ result: { agent: { pane_id: "w1:p2", agent_status: "working" } } }));
+      }
+      if (group === "tab" && action === "rename") {
+        return output(JSON.stringify({ result: { tab: { tab_id: "w1:t2" } } }));
+      }
+      if (group === "tab" && action === "close") return output(JSON.stringify({ result: null }));
+      throw new Error(`unexpected: ${request.args.join(" ")}`);
+    };
+    const orchestrator = new SubagentOrchestrator({
+      runner,
+      extensionPath: "/extension.ts",
+      env: { HERDR_ENV: "1", HERDR_WORKSPACE_ID: "w1" },
+    });
+
+    const batch = await orchestrator.runBatch(
+      "call",
+      [{ label: "silent", task: "x" }],
+      { cwd: process.cwd() },
+      { concurrency: 1, timeoutMs: 100, keepTabs: true },
+    );
+
+    expect(batch.results[0]).toMatchObject({ status: "timed_out", tabId: "w1:t2" });
+    expect(calls.some((args) => args.join(" ") === "tab close w1:t2")).toBe(true);
+    expect(orchestrator.listFleet()).toEqual([]);
   });
 
   it("closes a half-created tab when prompting fails", async () => {

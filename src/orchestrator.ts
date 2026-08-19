@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { extractLastAssistantText, readChildResult } from "./child.ts";
+import { CHILD_SILENT_ENV, extractLastAssistantText, readChildResult } from "./child.ts";
 import { HerdrClient, HerdrCommandError } from "./herdr.ts";
 import { runLocalChild } from "./local.ts";
 import type { ProcessRunner } from "./process.ts";
@@ -37,6 +37,13 @@ const CHILD_WORKING_ICON = "⏳";
 const CHILD_DONE_ICON = "✅";
 const CHILD_FAILED_ICON = "❌";
 const PARENT_WAITING_ICON = "📋";
+
+class ChildResultTimeoutError extends Error {
+  constructor(label: string, timeoutMs: number) {
+    super(`Child ${label} did not publish a result within ${timeoutMs}ms.`);
+    this.name = "ChildResultTimeoutError";
+  }
+}
 
 class ChildExecutionError extends Error {
   constructor(
@@ -81,8 +88,9 @@ function classifyError(error: unknown, signal?: AbortSignal): { status: ChildRes
   if (signal?.aborted) return { status: "aborted", error: "Subagent run was aborted." };
   const original = error instanceof ChildExecutionError ? error.original : error;
   if (
-    original instanceof HerdrCommandError &&
-    (original.output?.timedOut || original.operation === "pane shell readiness")
+    original instanceof ChildResultTimeoutError ||
+    (original instanceof HerdrCommandError &&
+      (original.output?.timedOut || original.operation === "pane shell readiness"))
   ) {
     return { status: "timed_out", error: original.message };
   }
@@ -214,6 +222,7 @@ export class SubagentOrchestrator {
         prompt: taskPrompt(prompt),
         timeoutMs,
         signal,
+        wait: false,
       });
       if (promptSnapshot.agent_status === "blocked") {
         throw new Error(`Child ${entry.label} is blocked and requires human input.`);
@@ -221,7 +230,7 @@ export class SubagentOrchestrator {
 
       const childResult = await readChildResult(resultPath, {
         signal,
-        attempts: 20,
+        attempts: Math.max(1, Math.ceil(timeoutMs / 100)),
         delayMs: 100,
         notBeforeMs: resultNotBeforeMs,
       });
@@ -233,7 +242,8 @@ export class SubagentOrchestrator {
         const session = snapshot.agent_session;
         if (session?.kind === "path" && session.value) summary = await transcriptFallback(session.value);
       }
-      if (!summary && childResult?.status !== "failed") {
+      if (!summary && !childResult) throw new ChildResultTimeoutError(entry.label, timeoutMs);
+      if (!summary && childResult && childResult.status !== "failed") {
         throw new Error(`Child ${entry.label} completed without a collectable summary.`);
       }
 
@@ -516,7 +526,11 @@ export class SubagentOrchestrator {
         workspaceId: this.env.HERDR_WORKSPACE_ID!,
         cwd,
         label: `${CHILD_WORKING_ICON} ${label}`,
-        env: { HERDR_SUBAGENT: "1", HERDR_SUBAGENT_RESULT_FILE: resultPath },
+        env: {
+          HERDR_SUBAGENT: "1",
+          HERDR_SUBAGENT_RESULT_FILE: resultPath,
+          [CHILD_SILENT_ENV]: "1",
+        },
         signal,
       });
       tabId = tab.tabId;
@@ -534,7 +548,7 @@ export class SubagentOrchestrator {
       this.resultPaths.set(tabId, resultPath);
       emit({ status: "starting", tabId, paneId });
 
-      const piArgs = ["--extension", this.extensionPath, "--name", label];
+      const piArgs = ["--no-extensions", "--extension", this.extensionPath, "--name", label];
       if (dispatch.model) piArgs.push("--model", dispatch.model);
       if (dispatch.thinkingLevel) piArgs.push("--thinking", dispatch.thinkingLevel);
       await this.herdr.startAgentWhenReady({
@@ -553,19 +567,25 @@ export class SubagentOrchestrator {
         prompt: taskPrompt(task),
         timeoutMs: options.timeoutMs,
         signal,
+        wait: false,
       });
       if (promptSnapshot.agent_status === "blocked") {
         throw new Error(`Child ${label} is blocked and requires human input.`);
       }
 
-      let childResult = await readChildResult(resultPath, { signal, attempts: 20, delayMs: 100 });
+      const childResult = await readChildResult(resultPath, {
+        signal,
+        attempts: Math.max(1, Math.ceil(options.timeoutMs / 100)),
+        delayMs: 100,
+      });
       let summary = childResult?.summary ?? "";
       if (!summary) {
         const snapshot = promptSnapshot.agent_session ? promptSnapshot : await this.herdr.getAgent(paneId, signal);
         const session = snapshot.agent_session;
         if (session?.kind === "path" && session.value) summary = await transcriptFallback(session.value);
       }
-      if (!summary && childResult?.status !== "failed") {
+      if (!summary && !childResult) throw new ChildResultTimeoutError(label, options.timeoutMs);
+      if (!summary && childResult && childResult.status !== "failed") {
         throw new Error(`Child ${label} completed without a collectable summary.`);
       }
 
