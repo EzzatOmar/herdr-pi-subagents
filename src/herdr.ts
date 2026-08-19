@@ -13,6 +13,15 @@ interface TabListPayload {
   tabs?: Array<{ tab_id?: string; label?: string }>;
 }
 
+interface TabPayload {
+  tab?: { tab_id?: string; label?: string };
+}
+
+export interface HerdrTab {
+  tabId: string;
+  label: string;
+}
+
 interface PaneListPayload {
   panes?: Array<{ pane_id?: string; tab_id?: string }>;
 }
@@ -369,6 +378,16 @@ export class HerdrClient {
     });
     if (!result.agent) throw new HerdrCommandError("agent get", "response omitted agent");
     return result.agent;
+  }
+
+  async getTab(tabId: string, signal?: AbortSignal): Promise<HerdrTab> {
+    const result = await this.call<TabPayload>("tab get", ["tab", "get", tabId], { signal, timeoutMs: 5_000 });
+    if (!result.tab?.tab_id) throw new HerdrCommandError("tab get", "response omitted tab_id");
+    return { tabId: result.tab.tab_id, label: result.tab.label ?? "" };
+  }
+
+  async renameTab(tabId: string, label: string, signal?: AbortSignal): Promise<void> {
+    await this.call<TabPayload>("tab rename", ["tab", "rename", tabId, label], { signal, timeoutMs: 5_000 });
   }
 
   async closeTab(tabId: string, signal?: AbortSignal): Promise<void> {

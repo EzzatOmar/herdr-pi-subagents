@@ -2,7 +2,7 @@
 
 A Pi extension for concurrent delegation. A parent can run several isolated Pi agents and receives one collected set of concise summaries.
 
-- **Inside Herdr:** every child runs as a real interactive Pi agent in its own no-focus tab in the parent's current workspace.
+- **Inside Herdr:** every child runs as a real interactive Pi agent in its own no-focus tab in the parent's current workspace. Tab-title icons distinguish the waiting parent (`📋`), active children (`⏳`), and completed children (`✅`).
 - **Outside Herdr:** every child runs as an isolated local Pi subprocess, so delegation still works without tabs.
 
 ## Requirements
@@ -118,15 +118,19 @@ The extension never lists or closes unrelated Herdr tabs.
 
 ## Herdr lifecycle
 
+While a batch is running, the parent tab is prefixed with `📋`. Its original title is restored when the batch finishes. Restoration is best-effort and does not overwrite a title the user changed while waiting.
+
 For every task, the extension:
 
-1. creates a tab in `$HERDR_WORKSPACE_ID` with the task cwd and final label;
+1. creates a tab in `$HERDR_WORKSPACE_ID` titled `⏳ <label>` with the task cwd;
 2. passes `--no-focus` so it does not steal the user's focus;
 3. polls `herdr pane process-info` until the shell owns the foreground process group;
 4. starts Pi through `herdr agent start`, retrying a remaining shell-busy race within the same readiness deadline;
 5. submits the task through `herdr agent prompt --wait`;
 6. collects the final summary over a private result-file protocol;
-7. keeps the successful tab by default for human inspection.
+7. renames a successful tab to `✅ <label>` and keeps it by default for human inspection.
+
+Failed tabs are marked `❌` before automatic cleanup. Title markers are cosmetic and best-effort: a rename failure never changes the task result.
 
 Use `action=close` after consuming the summaries. Set `keepTabs: false` to close successful tabs immediately. Failed, timed-out, and aborted children are closed automatically. If bounded cleanup itself fails, the tab remains in the owned fleet with `failed` status so `list`/`close` can retry it.
 

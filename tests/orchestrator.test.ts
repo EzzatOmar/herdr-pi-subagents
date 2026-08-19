@@ -82,12 +82,26 @@ describe("Herdr orchestration", () => {
     const calls: string[][] = [];
     const resultPaths = new Map<string, string>();
     const tabs: Array<{ tab_id: string; label: string }> = [];
+    let parentLabel = "parent work";
     let tabNumber = 0;
     const runner: ProcessRunner = async (request) => {
       calls.push(request.args);
       const [group, action] = request.args;
       if (group === "tab" && action === "list") {
         return output(JSON.stringify({ result: { tabs } }));
+      }
+      if (group === "tab" && action === "get") {
+        return output(
+          JSON.stringify({ result: { tab: { tab_id: request.args[2], label: parentLabel } } }),
+        );
+      }
+      if (group === "tab" && action === "rename") {
+        const tabId = request.args[2]!;
+        const newLabel = request.args[3]!;
+        if (tabId === "w9:parent") parentLabel = newLabel;
+        const childTab = tabs.find((tab) => tab.tab_id === tabId);
+        if (childTab) childTab.label = newLabel;
+        return output(JSON.stringify({ result: { tab: { tab_id: tabId, label: newLabel } } }));
       }
       if (group === "tab" && action === "create") {
         tabNumber += 1;
@@ -130,7 +144,12 @@ describe("Herdr orchestration", () => {
     const orchestrator = new SubagentOrchestrator({
       runner,
       extensionPath: "/extension.ts",
-      env: { HERDR_ENV: "1", HERDR_WORKSPACE_ID: "w9", HERDR_BIN: "herdr-test" },
+      env: {
+        HERDR_ENV: "1",
+        HERDR_WORKSPACE_ID: "w9",
+        HERDR_TAB_ID: "w9:parent",
+        HERDR_BIN: "herdr-test",
+      },
       now: () => 100,
     });
 
@@ -151,7 +170,13 @@ describe("Herdr orchestration", () => {
     for (const args of creates) {
       expect(args).toContain("--no-focus");
       expect(args).toContain("w9");
+      expect(args[args.indexOf("--label") + 1]).toMatch(/^⏳ /u);
     }
+    expect(calls.some((args) => args.join(" ") === "tab rename w9:parent 📋 parent work")).toBe(true);
+    expect(calls.some((args) => args.join(" ") === "tab rename w9:parent parent work")).toBe(true);
+    expect(calls.some((args) => args.join(" ") === "tab rename w9:t1 ✅ review")).toBe(true);
+    expect(calls.some((args) => args.join(" ") === "tab rename w9:t2 ✅ tests")).toBe(true);
+    expect(parentLabel).toBe("parent work");
     expect(orchestrator.listFleet().map((entry) => entry.tabId)).toEqual(["w9:t1", "w9:t2"]);
 
     const closed = await orchestrator.closeFleet(["w9:t1", "unowned"]);

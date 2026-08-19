@@ -27,6 +27,17 @@ export interface OrchestratorOptions {
 
 type ProgressCallback = (progress: ChildProgress[]) => void;
 
+interface ParentTabActivity {
+  count: number;
+  originalLabel?: string;
+  waitingLabel?: string;
+}
+
+const CHILD_WORKING_ICON = "⏳";
+const CHILD_DONE_ICON = "✅";
+const CHILD_FAILED_ICON = "❌";
+const PARENT_WAITING_ICON = "📋";
+
 class ChildExecutionError extends Error {
   constructor(
     readonly original: unknown,
@@ -115,6 +126,7 @@ export class SubagentOrchestrator {
   private readonly now: () => number;
   private readonly herdr: HerdrClient;
   private readonly fleet = new Map<string, FleetEntry>();
+  private readonly parentTabActivity = new Map<string, ParentTabActivity>();
 
   constructor(options: OrchestratorOptions) {
     this.runner = options.runner ?? runProcess;
@@ -178,27 +190,75 @@ export class SubagentOrchestrator {
     };
     onProgress?.(progress.map((item) => ({ ...item })));
 
-    const results = new Array<ChildResult>(tasks.length);
-    let nextIndex = 0;
-    const workers = Array.from({ length: Math.min(options.concurrency, tasks.length) }, async () => {
-      for (;;) {
-        const index = nextIndex++;
-        if (index >= tasks.length) return;
-        const task = tasks[index]!;
-        results[index] = await this.runOne(
-          toolCallId,
-          index,
-          task,
-          dispatch,
-          options,
-          backend,
-          signal,
-          (patch) => emit(index, patch),
-        );
+    const parentTabId = backend === "herdr" ? this.env.HERDR_TAB_ID : undefined;
+    if (parentTabId) await this.beginParentWaiting(parentTabId, signal);
+    try {
+      const results = new Array<ChildResult>(tasks.length);
+      let nextIndex = 0;
+      const workers = Array.from({ length: Math.min(options.concurrency, tasks.length) }, async () => {
+        for (;;) {
+          const index = nextIndex++;
+          if (index >= tasks.length) return;
+          const task = tasks[index]!;
+          results[index] = await this.runOne(
+            toolCallId,
+            index,
+            task,
+            dispatch,
+            options,
+            backend,
+            signal,
+            (patch) => emit(index, patch),
+          );
+        }
+      });
+      await Promise.all(workers);
+      return { backend, results };
+    } finally {
+      if (parentTabId) await this.endParentWaiting(parentTabId);
+    }
+  }
+
+  private async beginParentWaiting(tabId: string, signal?: AbortSignal): Promise<void> {
+    const active = this.parentTabActivity.get(tabId);
+    if (active) {
+      active.count += 1;
+      return;
+    }
+
+    const state: ParentTabActivity = { count: 1 };
+    this.parentTabActivity.set(tabId, state);
+    try {
+      const tab = await this.herdr.getTab(tabId, signal);
+      const waitingLabel = tab.label.startsWith(`${PARENT_WAITING_ICON} `)
+        ? tab.label
+        : `${PARENT_WAITING_ICON}${tab.label ? ` ${tab.label}` : ""}`;
+      await this.herdr.renameTab(tabId, waitingLabel, signal);
+      state.originalLabel = tab.label;
+      state.waitingLabel = waitingLabel;
+    } catch {
+      // Tab markers are best-effort and must never prevent delegation.
+    }
+  }
+
+  private async endParentWaiting(tabId: string): Promise<void> {
+    const state = this.parentTabActivity.get(tabId);
+    if (!state) return;
+    state.count -= 1;
+    if (state.count > 0) return;
+    this.parentTabActivity.delete(tabId);
+    if (state.originalLabel === undefined || state.waitingLabel === undefined) return;
+
+    try {
+      const cleanupSignal = AbortSignal.timeout(3_000);
+      const current = await this.herdr.getTab(tabId, cleanupSignal);
+      // Do not overwrite a label the user changed while the batch was running.
+      if (current.label === state.waitingLabel) {
+        await this.herdr.renameTab(tabId, state.originalLabel, cleanupSignal);
       }
-    });
-    await Promise.all(workers);
-    return { backend, results };
+    } catch {
+      // Restoring a cosmetic marker is best-effort.
+    }
   }
 
   private async runOne(
@@ -298,6 +358,14 @@ export class SubagentOrchestrator {
     };
   }
 
+  private async markChildTab(tabId: string, icon: string, label: string): Promise<void> {
+    try {
+      await this.herdr.renameTab(tabId, `${icon} ${label}`, AbortSignal.timeout(2_000));
+    } catch {
+      // Status markers are best-effort and must not change child results.
+    }
+  }
+
   private async runHerdr(
     index: number,
     label: string,
@@ -319,7 +387,7 @@ export class SubagentOrchestrator {
       const tab = await this.herdr.createTab({
         workspaceId: this.env.HERDR_WORKSPACE_ID!,
         cwd,
-        label,
+        label: `${CHILD_WORKING_ICON} ${label}`,
         env: { HERDR_SUBAGENT: "1", HERDR_SUBAGENT_RESULT_FILE: resultPath },
         signal,
       });
@@ -373,6 +441,7 @@ export class SubagentOrchestrator {
 
       const capped = truncateUtf8(summary);
       completed = childResult?.status !== "failed";
+      if (completed) await this.markChildTab(tabId, CHILD_DONE_ICON, label);
       const result: ChildResult = {
         index,
         label,
@@ -399,6 +468,7 @@ export class SubagentOrchestrator {
     } catch (error) {
       throw new ChildExecutionError(error, paneId, tabId, name);
     } finally {
+      if (tabId && !completed) await this.markChildTab(tabId, CHILD_FAILED_ICON, label);
       if (tabId && (!completed || !options.keepTabs)) {
         let closed = false;
         try {
