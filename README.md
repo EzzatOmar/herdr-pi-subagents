@@ -5,26 +5,68 @@ A Pi extension for concurrent delegation. A parent can run several isolated Pi a
 - **Inside Herdr:** every child runs as a real interactive Pi agent in its own no-focus tab in the parent's current workspace.
 - **Outside Herdr:** every child runs as an isolated local Pi subprocess, so delegation still works without tabs.
 
+## Requirements
+
+- Node.js 22 or newer.
+- Pi with a configured model and credentials (tested with Pi 0.84.2).
+- Herdr is optional. When Pi is launched inside Herdr (tested with Herdr 0.8.0), children appear in separate tabs. Otherwise, the extension uses isolated local Pi subprocesses.
+
 ## Install
 
-From Git:
+### User installation
+
+Install directly from GitHub. Pi records the package in `~/.pi/agent/settings.json` and loads it in future sessions:
 
 ```sh
 pi install git:github.com/EzzatOmar/herdr-pi-subagents
 ```
 
-For development from this checkout:
+For a private repository or an SSH-based GitHub setup:
 
 ```sh
+pi install git:git@github.com:EzzatOmar/herdr-pi-subagents
+```
+
+### Project-local installation
+
+To enable it only for one project, run this from that project. Pi writes the package source to `.pi/settings.json`:
+
+```sh
+pi install -l git:github.com/EzzatOmar/herdr-pi-subagents
+```
+
+After trusting the project, Pi installs any missing project packages automatically.
+
+### One-off or development use
+
+Run from GitHub without saving the package:
+
+```sh
+pi -e git:github.com/EzzatOmar/herdr-pi-subagents
+```
+
+Or run a checkout directly:
+
+```sh
+git clone git@github.com:EzzatOmar/herdr-pi-subagents.git
+cd herdr-pi-subagents
 npm install
 pi -e ./src/index.ts
 ```
 
-The package imports Pi's core packages as peers, as required for Pi packages.
+Update installed Pi packages with `pi update --extensions`. Remove this package with:
 
-## Tool
+```sh
+pi remove git:github.com/EzzatOmar/herdr-pi-subagents
+```
 
-The extension registers one tool, `subagent`.
+## Use
+
+The extension registers a `subagent` tool. Start or restart Pi after installation, then ask the parent naturally, for example:
+
+> Delegate repository structure, Git state, test coverage, and extension review to four independent subagents. Run them concurrently, do not edit files, and summarize their findings.
+
+Pi should place independent tasks into one concurrent tool call. You can also instruct it to keep the resulting Herdr tabs open for inspection or close them after collecting the summaries.
 
 ### Run and collect a concurrent batch
 
@@ -42,6 +84,15 @@ The extension registers one tool, `subagent`.
 ```
 
 The result contains a section per child, in input order, with status, summary, and Herdr tab identifiers when applicable.
+
+Run options:
+
+- `tasks`: 1–8 focused child assignments. Each accepts `task`, optional `label`, and optional `cwd`.
+- `concurrency`: simultaneous children, default 4 and maximum 8.
+- `timeoutSeconds`: per-child deadline, default 900 seconds.
+- `keepTabs`: retain successful Herdr tabs for inspection; defaults to `true` and has no effect on the local fallback.
+
+Assign only independent work concurrently. Children have isolated conversation contexts but may share a working directory and filesystem.
 
 ### Inspect retained tabs
 
