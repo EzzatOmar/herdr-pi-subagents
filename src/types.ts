@@ -54,6 +54,7 @@ export interface FleetEntry {
   label: string;
   cwd: string;
   status: "starting" | "working" | "completed" | "failed";
+  reusable: boolean;
   createdAt: number;
 }
 

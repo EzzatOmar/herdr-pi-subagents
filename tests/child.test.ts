@@ -69,6 +69,19 @@ describe("child result protocol", () => {
     expect(JSON.parse(await readFile(path, "utf8"))).toEqual(result);
   });
 
+  it("rejects a valid result older than the requested follow-up", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "subagent-child-test-"));
+    dirs.push(dir);
+    const path = join(dir, "result.json");
+    await writeChildResult(path, {
+      version: 1,
+      status: "completed",
+      summary: "stale",
+      writtenAt: new Date(0).toISOString(),
+    });
+    expect(await readChildResult(path, { attempts: 1, notBeforeMs: Date.now() })).toBeUndefined();
+  });
+
   it("rejects malformed result JSON", async () => {
     const dir = await mkdtemp(join(tmpdir(), "subagent-child-test-"));
     dirs.push(dir);

@@ -49,9 +49,10 @@ Create a distributable Pi extension that lets a parent agent spawn multiple suba
 
 ### Public surface
 
-Register one LLM-callable tool named `subagent` with three actions:
+Register one LLM-callable tool named `subagent` with four actions:
 
-- `run`: accept a batch of 1–8 `{ task, label?, cwd? }` items, execute up to a bounded concurrency, wait for every child, and return all summaries in input order.
+- `run`: accept a batch of 1–8 `{ task, label?, cwd?, effort? }` items, execute up to a bounded concurrency, wait for every child, and return all summaries in input order.
+- `prompt`: send a follow-up prompt to one reusable retained Herdr child by owned tab id, wait for it to settle, and return its new summary without starting a new agent.
 - `list`: show Herdr tabs created and retained by this extension instance.
 - `close`: close selected retained tab ids, or all retained tabs when ids are omitted.
 
@@ -81,7 +82,7 @@ Do not scrape terminal output. Every child receives:
 - a private `HERDR_SUBAGENT_RESULT_FILE` path under a mode-0700 temp directory;
 - this extension explicitly via `--extension`, ensuring the child hook is present in both installed and development runs.
 
-In child mode the extension does not expose the delegation tool (a recursion guard). It appends concise child instructions in `before_agent_start`. On `agent_settled`, it extracts the final assistant text from the child's own session branch and atomically writes a versioned JSON result file with summary/error/usage metadata. The parent retries briefly for write-order races and caps model-visible summary bytes. This combines the reference project's reliable parent-side collection principle with a package-owned machine-readable channel that also works for ephemeral local children.
+In child mode the extension does not expose the delegation tool (a recursion guard). It appends concise child instructions in `before_agent_start`. On `agent_settled`, it extracts the final assistant text from the child's own session branch and atomically writes a versioned JSON result file with summary/error/usage metadata. The parent retries briefly for write-order races and caps model-visible summary bytes. For retained Herdr children, the extension keeps the private result path in memory, removes the stale result before each follow-up, rejects results timestamped before that follow-up, and reuses the same settled-result protocol; the child's atomic writer recreates the private directory when needed. This combines the reference project's reliable parent-side collection principle with a package-owned machine-readable channel that also works for ephemeral local children.
 
 ### Inheritance and isolation
 
@@ -89,7 +90,8 @@ Children inherit the parent's active `provider/model` and thinking level through
 
 ### State, UI, and cleanup
 
-- Keep an in-memory fleet map only for tabs this extension created; `list` and `close` never operate on unrelated tabs.
+- Keep an in-memory fleet map only for tabs this extension created; `prompt`, `list`, and `close` never operate on unrelated tabs.
+- Track which retained tabs reached a reusable idle state and reject overlapping prompts to the same child. Local subprocess children cannot be re-prompted after exit.
 - Stream compact aggregate progress through `onUpdate` and custom tool rendering.
 - Forward tool cancellation and per-task deadlines to child processes.
 - Leave successfully retained tabs alive across the parent session for human inspection; explicit `close` owns cleanup.
@@ -122,6 +124,7 @@ Children inherit the parent's active `provider/model` and thinking level through
 - [x] Perform safe local, one-tab Herdr, and two-tab concurrent Herdr smoke tests; close every test-created tab.
 - [x] Finalize README and this work log with validation evidence and limitations.
 - [x] Add per-task low/medium/high effort overrides, tests, and documentation.
+- [x] Add retained-child follow-up prompting, result recollection, tests, and documentation.
 
 ## Work log
 
@@ -141,3 +144,5 @@ Children inherit the parent's active `provider/model` and thinking level through
 - Manual validation: one local child returned its summary; one Herdr child returned its summary and its test tab was closed; two simultaneous Herdr children each ran in their own tabs, returned ordered summaries, and both tabs were closed. After the shell-readiness fix, four simultaneous Herdr children all started, returned the expected summaries, and all four test tabs were closed. A title-marker smoke test observed `📋 1` on the waiting parent and `⏳ status marker smoke` on the active child, followed by restoration to `1` and child completion as `✅ status marker smoke`; the test tab was then closed. A package load smoke test (`pi -e . --list-models ...`) exited successfully, and `npm pack --dry-run` contains only the package runtime, README/license, and this research plan.
 - Requested enhancement: allow each task to select low, medium, or high model effort while retaining parent-level inheritance when omitted. The public field is `effort`; Pi's canonical middle level is `medium`, not `mid`.
 - Implemented the per-task `effort` schema and dispatch override for both local subprocess and Herdr-tab children. Updated prompt guidance and README examples, and verified explicit overrides plus inherited parent levels in both backends. Validation: `npm run check` passes strict TypeScript and all 23 tests across 5 files.
+- Requested enhancement: allow the parent to re-prompt a successfully retained Herdr child later while preserving that child's existing Pi session context. The follow-up must target only an owned reusable tab, serialize per child, clear stale result data, wait for settlement, and return the new summary. Local children remain one-shot because their processes exit.
+- Implemented `action=prompt` with owned-tab validation, explicit reusable fleet state, same-agent `herdr agent prompt --wait`, stale-result removal, atomic result recollection, transcript fallback, parent/child title markers, overlap rejection, and bounded cleanup when a follow-up leaves agent state uncertain. README and tool guidance now document the lifecycle. Validation: strict TypeScript and all 25 tests across 5 files pass, including same-pane reuse without another tab/agent, inherited result-channel recreation, stale-result freshness checks, concurrent prompt rejection, local-backend refusal, follow-up timeout cleanup, and unowned-tab refusal.

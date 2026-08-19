@@ -1,4 +1,5 @@
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import { describe, expect, it } from "vitest";
 import { SubagentOrchestrator } from "../src/orchestrator.ts";
 import type { ProcessOutput, ProcessRunner } from "../src/process.ts";
@@ -78,6 +79,7 @@ describe("local orchestration", () => {
       { concurrency: 1, timeoutMs: 10, keepTabs: false },
     );
     expect(batch.results[0]?.status).toBe("timed_out");
+    await expect(orchestrator.promptRetained("missing", "follow up", 1_000)).rejects.toThrow("requires Herdr");
   });
 });
 
@@ -135,7 +137,15 @@ describe("Herdr orchestration", () => {
       }
       if (group === "agent" && action === "prompt") {
         const paneId = request.args[2]!;
-        await writeFile(resultPaths.get(paneId)!, JSON.stringify(result(`summary for ${paneId}`)));
+        if (request.args[3]!.includes("timed follow up")) {
+          return output("", { code: 1, timedOut: true });
+        }
+        const resultPath = resultPaths.get(paneId)!;
+        await mkdir(dirname(resultPath), { recursive: true });
+        const isFollowUp = request.args[3]!.includes("follow up");
+        const summary = isFollowUp ? `follow-up summary for ${paneId}` : `summary for ${paneId}`;
+        const writtenAt = isFollowUp ? new Date().toISOString() : new Date(0).toISOString();
+        await writeFile(resultPath, JSON.stringify({ ...result(summary), writtenAt }));
         return output(JSON.stringify({ result: { agent: { pane_id: paneId, agent_status: "done" } } }));
       }
       if (group === "tab" && action === "close") {
@@ -169,6 +179,8 @@ describe("Herdr orchestration", () => {
 
     expect(batch.results.map((item) => item.label)).toEqual(["review", "tests"]);
     for (const item of batch.results) expect(item.summary).toBe(`summary for ${item.paneId}`);
+    const reviewChild = batch.results[0]!;
+    const testsChild = batch.results[1]!;
     const creates = calls.filter((args) => args[0] === "tab" && args[1] === "create");
     expect(creates).toHaveLength(2);
     for (const args of creates) {
@@ -185,16 +197,43 @@ describe("Herdr orchestration", () => {
     expect(effortFor("tests")).toBe("high");
     expect(calls.some((args) => args.join(" ") === "tab rename w9:parent 📋 parent work")).toBe(true);
     expect(calls.some((args) => args.join(" ") === "tab rename w9:parent parent work")).toBe(true);
-    expect(calls.some((args) => args.join(" ") === "tab rename w9:t1 ✅ review")).toBe(true);
-    expect(calls.some((args) => args.join(" ") === "tab rename w9:t2 ✅ tests")).toBe(true);
+    expect(calls.some((args) => args.join(" ") === `tab rename ${reviewChild.tabId} ✅ review`)).toBe(true);
+    expect(calls.some((args) => args.join(" ") === `tab rename ${testsChild.tabId} ✅ tests`)).toBe(true);
     expect(parentLabel).toBe("parent work");
-    expect(orchestrator.listFleet().map((entry) => entry.tabId)).toEqual(["w9:t1", "w9:t2"]);
+    expect(orchestrator.listFleet().map((entry) => entry.tabId)).toEqual(
+      expect.arrayContaining([reviewChild.tabId, testsChild.tabId]),
+    );
+    expect(orchestrator.listFleet().every((entry) => entry.reusable)).toBe(true);
 
-    const closed = await orchestrator.closeFleet(["w9:t1", "unowned"]);
-    expect(closed.closed).toEqual(["w9:t1"]);
+    const startCount = starts.length;
+    const createCount = creates.length;
+    const pendingFollowUp = orchestrator.promptRetained(testsChild.tabId!, "follow up on the tests", 1_000);
+    await expect(
+      orchestrator.promptRetained(testsChild.tabId!, "overlapping follow up", 1_000),
+    ).rejects.toThrow("busy");
+    const followUp = await pendingFollowUp;
+    expect(followUp).toMatchObject({
+      status: "completed",
+      summary: `follow-up summary for ${testsChild.paneId}`,
+      paneId: testsChild.paneId,
+      tabId: testsChild.tabId,
+    });
+    expect(calls.filter((args) => args[0] === "agent" && args[1] === "start")).toHaveLength(startCount);
+    expect(calls.filter((args) => args[0] === "tab" && args[1] === "create")).toHaveLength(createCount);
+    expect(calls.filter((args) => args[0] === "agent" && args[1] === "prompt")).toHaveLength(3);
+    expect(orchestrator.listFleet().find((entry) => entry.tabId === testsChild.tabId)?.reusable).toBe(true);
+    await expect(orchestrator.promptRetained("unowned", "x", 1_000)).rejects.toThrow("not owned");
+
+    const timedOut = await orchestrator.promptRetained(reviewChild.tabId!, "timed follow up", 1_000);
+    expect(timedOut.status).toBe("timed_out");
+    expect(orchestrator.listFleet().map((entry) => entry.tabId)).toEqual([testsChild.tabId]);
+    expect(calls.some((args) => args.join(" ") === `tab close ${reviewChild.tabId}`)).toBe(true);
+
+    const closed = await orchestrator.closeFleet([testsChild.tabId!, "unowned"]);
+    expect(closed.closed).toEqual([testsChild.tabId]);
     expect(closed.errors[0]).toContain("not owned");
-    expect(orchestrator.listFleet().map((entry) => entry.tabId)).toEqual(["w9:t2"]);
-    expect(calls.some((args) => args.join(" ") === "tab close w9:t1")).toBe(true);
+    expect(orchestrator.listFleet()).toEqual([]);
+    expect(calls.some((args) => args.join(" ") === `tab close ${testsChild.tabId}`)).toBe(true);
   });
 
   it("refuses a hidden fallback when Herdr context is incomplete", async () => {
@@ -285,7 +324,7 @@ describe("Herdr orchestration", () => {
 
     expect(batch.results[0]).toMatchObject({ status: "failed", paneId: "w1:p9", tabId: "w1:t9" });
     expect(orchestrator.listFleet()).toEqual([
-      expect.objectContaining({ tabId: "w1:t9", paneId: "w1:p9", status: "failed" }),
+      expect.objectContaining({ tabId: "w1:t9", paneId: "w1:p9", status: "failed", reusable: false }),
     ]);
   });
 

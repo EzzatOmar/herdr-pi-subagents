@@ -70,7 +70,7 @@ export async function writeChildResult(path: string, result: ChildResultFile): P
 
 export async function readChildResult(
   path: string,
-  options: { attempts?: number; delayMs?: number; signal?: AbortSignal } = {},
+  options: { attempts?: number; delayMs?: number; notBeforeMs?: number; signal?: AbortSignal } = {},
 ): Promise<ChildResultFile | undefined> {
   const attempts = options.attempts ?? 20;
   const delayMs = options.delayMs ?? 100;
@@ -78,7 +78,12 @@ export async function readChildResult(
     options.signal?.throwIfAborted();
     try {
       const parsed = JSON.parse(await readFile(path, "utf8")) as unknown;
-      if (isChildResultFile(parsed)) return parsed;
+      if (
+        isChildResultFile(parsed) &&
+        (options.notBeforeMs === undefined || Date.parse(parsed.writtenAt) >= options.notBeforeMs)
+      ) {
+        return parsed;
+      }
     } catch {
       // The child hook may settle just after Herdr reports the idle transition.
     }

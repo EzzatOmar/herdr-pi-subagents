@@ -2,7 +2,7 @@
 
 A Pi extension for concurrent delegation. A parent can run several isolated Pi agents and receives one collected set of concise summaries.
 
-- **Inside Herdr:** every child runs as a real interactive Pi agent in its own no-focus tab in the parent's current workspace. Tab-title icons distinguish the waiting parent (`📋`), active children (`⏳`), and completed children (`✅`).
+- **Inside Herdr:** every child runs as a real interactive Pi agent in its own no-focus tab in the parent's current workspace. Retained children can receive later follow-up prompts while preserving their session context. Tab-title icons distinguish the waiting parent (`📋`), active children (`⏳`), and completed children (`✅`).
 - **Outside Herdr:** every child runs as an isolated local Pi subprocess, so delegation still works without tabs.
 
 ## Requirements
@@ -94,6 +94,21 @@ Run options:
 
 Assign only independent work concurrently. Children have isolated conversation contexts but may share a working directory and filesystem.
 
+### Continue a retained child
+
+Under Herdr, send a follow-up to a successfully retained child by its owned tab id:
+
+```json
+{
+  "action": "prompt",
+  "tabId": "w8:t2",
+  "prompt": "Now implement the fixes from your review and run the relevant tests.",
+  "timeoutSeconds": 900
+}
+```
+
+The extension reuses the same Pi agent and conversation context, waits for it to settle, and returns its new summary. It does not create another tab or agent. Follow-ups are allowed only for reusable tabs owned by the current extension instance, and overlapping prompts to the same child are rejected. Local fallback children cannot be continued because their processes exit after their initial task.
+
 ### Inspect retained tabs
 
 ```json
@@ -128,7 +143,9 @@ For every task, the extension:
 4. starts Pi through `herdr agent start`, retrying a remaining shell-busy race within the same readiness deadline;
 5. submits the task through `herdr agent prompt --wait`;
 6. collects the final summary over a private result-file protocol;
-7. renames a successful tab to `✅ <label>` and keeps it by default for human inspection.
+7. renames a successful tab to `✅ <label>` and keeps it by default for inspection or follow-up work.
+
+For `action=prompt`, the retained tab returns to `⏳` while the same agent handles the follow-up, then to `✅` or `❌` when it settles. An operational follow-up failure, timeout, or abort triggers bounded automatic cleanup because the agent's idle state may be uncertain; if cleanup fails, the tab remains owned with failed status so `close` can retry.
 
 Failed tabs are marked `❌` before automatic cleanup. Title markers are cosmetic and best-effort: a rename failure never changes the task result.
 
@@ -144,7 +161,7 @@ Children receive a private result path and this extension explicitly on their Pi
 - appends instructions requesting a concise final summary;
 - writes the final assistant response atomically on `agent_settled`.
 
-The parent never scrapes terminal output. For Herdr children, a Pi session transcript is used as a fallback if the result-file write races or fails. Local JSON events are the equivalent fallback outside Herdr.
+The parent never scrapes terminal output. For Herdr children, a Pi session transcript is used as a fallback if the result-file write races or fails. Before a retained child receives a follow-up, the parent clears its stale result and collects the next atomic settled result through the same private channel. Local JSON events are the equivalent fallback outside Herdr.
 
 ## Model and working directory
 

@@ -1,6 +1,6 @@
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { extractLastAssistantText, readChildResult } from "./child.ts";
 import { HerdrClient, HerdrCommandError } from "./herdr.ts";
 import { runLocalChild } from "./local.ts";
@@ -126,6 +126,7 @@ export class SubagentOrchestrator {
   private readonly now: () => number;
   private readonly herdr: HerdrClient;
   private readonly fleet = new Map<string, FleetEntry>();
+  private readonly resultPaths = new Map<string, string>();
   private readonly parentTabActivity = new Map<string, ParentTabActivity>();
 
   constructor(options: OrchestratorOptions) {
@@ -154,15 +155,138 @@ export class SubagentOrchestrator {
         errors.push(`${tabId}: not owned by this extension instance`);
         continue;
       }
+      if (entry.status === "starting" || entry.status === "working") {
+        errors.push(`${tabId}: subagent is busy`);
+        continue;
+      }
       try {
         await this.herdr.closeTab(tabId, signal);
-        this.fleet.delete(tabId);
+        await this.discardTabState(tabId);
         closed.push(tabId);
       } catch (error) {
         errors.push(`${tabId}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
     return { closed, errors };
+  }
+
+  private async discardTabState(tabId: string): Promise<void> {
+    this.fleet.delete(tabId);
+    const resultPath = this.resultPaths.get(tabId);
+    this.resultPaths.delete(tabId);
+    if (!resultPath) return;
+    try {
+      await rm(dirname(resultPath), { recursive: true, force: true });
+    } catch {
+      // The tab is already closed and private temporary data is best-effort cleanup.
+    }
+  }
+
+  async promptRetained(
+    tabId: string,
+    prompt: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<ChildResult> {
+    if (this.backend() !== "herdr") {
+      throw new Error("subagent action=prompt requires Herdr; local subagents exit after completion.");
+    }
+    const entry = this.fleet.get(tabId);
+    if (!entry) throw new Error(`${tabId}: not owned by this extension instance`);
+    if (!entry.reusable) throw new Error(`${tabId}: subagent is not reusable`);
+    if (entry.status === "starting" || entry.status === "working") {
+      throw new Error(`${tabId}: subagent is busy`);
+    }
+    const resultPath = this.resultPaths.get(tabId);
+    if (!resultPath) throw new Error(`${tabId}: reusable result channel is unavailable`);
+
+    entry.status = "working";
+    const parentTabId = this.env.HERDR_TAB_ID;
+    if (parentTabId) await this.beginParentWaiting(parentTabId, signal);
+    await this.markChildTab(tabId, CHILD_WORKING_ICON, entry.label);
+
+    try {
+      signal?.throwIfAborted();
+      await rm(resultPath, { force: true });
+      const resultNotBeforeMs = Date.now();
+      const promptSnapshot = await this.herdr.promptAgent({
+        paneId: entry.paneId,
+        prompt: taskPrompt(prompt),
+        timeoutMs,
+        signal,
+      });
+      if (promptSnapshot.agent_status === "blocked") {
+        throw new Error(`Child ${entry.label} is blocked and requires human input.`);
+      }
+
+      const childResult = await readChildResult(resultPath, {
+        signal,
+        attempts: 20,
+        delayMs: 100,
+        notBeforeMs: resultNotBeforeMs,
+      });
+      let summary = childResult?.summary ?? "";
+      if (!summary) {
+        const snapshot = promptSnapshot.agent_session
+          ? promptSnapshot
+          : await this.herdr.getAgent(entry.paneId, signal);
+        const session = snapshot.agent_session;
+        if (session?.kind === "path" && session.value) summary = await transcriptFallback(session.value);
+      }
+      if (!summary && childResult?.status !== "failed") {
+        throw new Error(`Child ${entry.label} completed without a collectable summary.`);
+      }
+
+      const completed = childResult?.status !== "failed";
+      const capped = truncateUtf8(summary);
+      entry.status = completed ? "completed" : "failed";
+      await this.markChildTab(tabId, completed ? CHILD_DONE_ICON : CHILD_FAILED_ICON, entry.label);
+      return {
+        index: 0,
+        label: entry.label,
+        task: prompt,
+        cwd: entry.cwd,
+        backend: "herdr",
+        status: completed ? "completed" : "failed",
+        summary: capped.text,
+        paneId: entry.paneId,
+        tabId,
+        agentName: entry.agentName,
+        ...(childResult?.error
+          ? { error: childResult.error }
+          : childResult?.status === "failed"
+            ? { error: `Child ${entry.label} failed without an error message.` }
+            : {}),
+        ...(capped.truncated ? { truncated: true } : {}),
+      };
+    } catch (error) {
+      const classified = classifyError(error, signal);
+      entry.status = "failed";
+      entry.reusable = false;
+      await this.markChildTab(tabId, CHILD_FAILED_ICON, entry.label);
+      let closed = false;
+      try {
+        await this.herdr.closeTab(tabId, AbortSignal.timeout(5_000));
+        closed = true;
+      } catch {
+        // Keep failed ownership when bounded cleanup fails so close can retry.
+      }
+      if (closed) await this.discardTabState(tabId);
+      return {
+        index: 0,
+        label: entry.label,
+        task: prompt,
+        cwd: entry.cwd,
+        backend: "herdr",
+        ...classified,
+        summary: "",
+        paneId: entry.paneId,
+        tabId,
+        agentName: entry.agentName,
+      };
+    } finally {
+      if (parentTabId) await this.endParentWaiting(parentTabId);
+    }
   }
 
   async runBatch(
@@ -404,8 +528,10 @@ export class SubagentOrchestrator {
         label,
         cwd,
         status: "starting",
+        reusable: false,
         createdAt: this.now(),
       });
+      this.resultPaths.set(tabId, resultPath);
       emit({ status: "starting", tabId, paneId });
 
       const piArgs = ["--extension", this.extensionPath, "--name", label];
@@ -466,7 +592,10 @@ export class SubagentOrchestrator {
       };
       if (completed && options.keepTabs) {
         const completedEntry = this.fleet.get(tabId);
-        if (completedEntry) completedEntry.status = "completed";
+        if (completedEntry) {
+          completedEntry.status = "completed";
+          completedEntry.reusable = true;
+        }
       }
       return result;
     } catch (error) {
@@ -474,6 +603,8 @@ export class SubagentOrchestrator {
     } finally {
       if (tabId && !completed) await this.markChildTab(tabId, CHILD_FAILED_ICON, label);
       if (tabId && (!completed || !options.keepTabs)) {
+        const closingEntry = this.fleet.get(tabId);
+        if (closingEntry) closingEntry.reusable = false;
         let closed = false;
         try {
           // Cleanup must outlive the parent abort, but it is independently
@@ -485,7 +616,7 @@ export class SubagentOrchestrator {
           const failedEntry = this.fleet.get(tabId);
           if (failedEntry) failedEntry.status = "failed";
         }
-        if (closed) this.fleet.delete(tabId);
+        if (closed) await this.discardTabState(tabId);
       }
     }
   }

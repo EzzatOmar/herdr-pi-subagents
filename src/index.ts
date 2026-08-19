@@ -25,8 +25,8 @@ const TaskSchema = Type.Object({
 });
 
 const SubagentSchema = Type.Object({
-  action: StringEnum(["run", "list", "close"] as const, {
-    description: "run a batch, list retained Herdr tabs, or close retained tabs",
+  action: StringEnum(["run", "prompt", "list", "close"] as const, {
+    description: "run a batch, prompt a retained child, list retained Herdr tabs, or close retained tabs",
   }),
   tasks: Type.Optional(
     Type.Array(TaskSchema, {
@@ -44,6 +44,12 @@ const SubagentSchema = Type.Object({
   keepTabs: Type.Optional(
     Type.Boolean({ description: "Keep successful Herdr tabs for inspection; default true" }),
   ),
+  tabId: Type.Optional(
+    Type.String({ minLength: 1, description: "Owned reusable Herdr tab to prompt (action=prompt)" }),
+  ),
+  prompt: Type.Optional(
+    Type.String({ minLength: 1, maxLength: 50_000, description: "Follow-up assignment (action=prompt)" }),
+  ),
   tabIds: Type.Optional(
     Type.Array(Type.String(), { maxItems: MAX_TASKS, description: "Owned tab ids to close; omit to close all" }),
   ),
@@ -52,8 +58,9 @@ const SubagentSchema = Type.Object({
 export type SubagentParams = Static<typeof SubagentSchema>;
 
 interface ToolDetails {
-  action: "run" | "list" | "close";
+  action: "run" | "prompt" | "list" | "close";
   batch?: BatchResult;
+  promptResult?: BatchResult["results"][number];
   fleet?: FleetEntry[];
   progress?: ChildProgress[];
   closed?: string[];
@@ -82,11 +89,18 @@ function batchText(batch: BatchResult): string {
   return `Subagents (${batch.backend}): ${succeeded}/${batch.results.length} completed\n\n${sections.join("\n\n---\n\n")}`;
 }
 
+function promptResultText(result: BatchResult["results"][number]): string {
+  const location = result.tabId ? ` (tab ${result.tabId})` : "";
+  const body = result.summary || result.error || "No summary was produced.";
+  const error = result.error && result.summary ? `\n\nError: ${result.error}` : "";
+  return `Subagent follow-up — ${result.status.replace("_", " ")}${location}\n\n### ${result.label}\n\n${body}${error}`;
+}
+
 function fleetText(fleet: FleetEntry[]): string {
   if (fleet.length === 0) return "No retained subagent tabs.";
   return [
     `Retained subagent tabs (${fleet.length}):`,
-    ...fleet.map((entry) => `- ${entry.label}: ${entry.status} (${entry.tabId}, ${entry.paneId})`),
+    ...fleet.map((entry) => `- ${entry.label}: ${entry.status}${entry.reusable ? ", reusable" : ""} (${entry.tabId}, ${entry.paneId})`),
   ].join("\n");
 }
 
@@ -102,8 +116,14 @@ function validateParams(params: SubagentParams): void {
   if (params.action === "run" && (!params.tasks || params.tasks.length === 0)) {
     throw new Error("subagent action=run requires at least one task.");
   }
+  if (params.action === "prompt" && (!params.tabId || !params.prompt)) {
+    throw new Error("subagent action=prompt requires tabId and prompt.");
+  }
   if (params.action !== "run" && params.tasks?.length) {
     throw new Error(`subagent action=${params.action} does not accept tasks.`);
+  }
+  if (params.action !== "prompt" && (params.tabId !== undefined || params.prompt !== undefined)) {
+    throw new Error(`subagent action=${params.action} does not accept tabId or prompt.`);
   }
   if (params.action !== "close" && params.tabIds?.length) {
     throw new Error(`subagent action=${params.action} does not accept tabIds.`);
@@ -125,16 +145,18 @@ export default function herdrPiSubagents(pi: ExtensionAPI): void {
       "Run up to 8 isolated Pi subagents and collect their final summaries.",
       "Under Herdr, every child is a visible no-focus tab in the current workspace; elsewhere each child is a local Pi subprocess.",
       "Each task may set low, medium, or high thinking effort; otherwise it inherits the parent's current level.",
+      "Under Herdr, action=prompt continues a retained child's existing session and returns its next summary.",
       "Use action=list or action=close to manage successful Herdr tabs retained after a run.",
     ].join(" "),
-    promptSnippet: "Run concurrent isolated subagents and collect their summaries",
+    promptSnippet: "Run isolated subagents or continue retained Herdr children and collect their summaries",
     promptGuidelines: [
       "Use subagent action=run for genuinely separable research, review, or implementation tasks that benefit from isolated context.",
       "Put multiple independent tasks in one subagent run call so they execute concurrently and their summaries are collected together.",
       "Set a task's effort to low, medium, or high when it should differ from the parent's thinking level; use medium, not mid.",
       "Subagent children share their selected working directories; do not assign overlapping file edits concurrently.",
-      "Under Herdr, successful tabs are retained by default for human inspection. After consuming their summaries, use subagent action=close with their tabIds, or omit tabIds to close all owned tabs.",
-      "Use subagent action=list when you need the current retained fleet. The tool never lists or closes tabs it did not create.",
+      "Under Herdr, successful tabs are retained by default. Use subagent action=prompt with an owned tabId to continue the same child's context and wait for its next summary.",
+      "After consuming retained summaries, use subagent action=close with their tabIds, or omit tabIds to close all owned tabs.",
+      "Use subagent action=list when you need the current retained fleet. The tool never prompts, lists, or closes tabs it did not create.",
     ],
     parameters: SubagentSchema,
 
@@ -145,6 +167,25 @@ export default function herdrPiSubagents(pi: ExtensionAPI): void {
         const fleet = orchestrator.listFleet();
         updateFleetWidget(ctx, fleet);
         return { content: [{ type: "text", text: fleetText(fleet) }], details: { action: "list", fleet } };
+      }
+
+      if (params.action === "prompt") {
+        onUpdate?.({
+          content: [{ type: "text", text: `Prompting retained subagent ${params.tabId}...` }],
+          details: { action: "prompt" },
+        });
+        const promptResult = await orchestrator.promptRetained(
+          params.tabId!,
+          params.prompt!,
+          (params.timeoutSeconds ?? 900) * 1_000,
+          signal,
+        );
+        const fleet = orchestrator.listFleet();
+        updateFleetWidget(ctx, fleet);
+        return {
+          content: [{ type: "text", text: promptResultText(promptResult) }],
+          details: { action: "prompt", promptResult, fleet },
+        };
       }
 
       if (params.action === "close") {
@@ -195,7 +236,8 @@ export default function herdrPiSubagents(pi: ExtensionAPI): void {
           0,
         );
       }
-      return new Text(`${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", args.action)}`, 0, 0);
+      const action = args.action === "prompt" ? `prompt ${args.tabId ?? ""}`.trim() : args.action;
+      return new Text(`${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", action)}`, 0, 0);
     },
 
     renderResult(result, { expanded, isPartial }, theme) {
@@ -205,6 +247,13 @@ export default function herdrPiSubagents(pi: ExtensionAPI): void {
         if (expanded) {
           text += `\n${details.progress.map((child) => `  ${child.label}: ${child.status}`).join("\n")}`;
         }
+        return new Text(text, 0, 0);
+      }
+      if (details?.promptResult) {
+        const child = details.promptResult;
+        const color = child.status === "completed" ? "success" : "error";
+        let text = theme.fg(color, `${child.status === "completed" ? "✓" : "✗"} ${child.label}`);
+        if (expanded) text += `\n${theme.fg("toolOutput", child.summary || child.error || "(no summary)")}`;
         return new Text(text, 0, 0);
       }
       if (details?.batch) {
