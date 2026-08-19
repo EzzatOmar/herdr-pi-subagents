@@ -284,10 +284,14 @@ export class SubagentOrchestrator {
 
     const tempDir = await mkdtemp(join(tmpdir(), "herdr-pi-subagent-"));
     const resultPath = join(tempDir, "result.json");
+    const childDispatch: DispatchContext = {
+      ...dispatch,
+      thinkingLevel: task.effort ?? dispatch.thinkingLevel,
+    };
     try {
       const result = backend === "herdr"
-        ? await this.runHerdr(index, label, task.task, cwd, resultPath, toolCallId, dispatch, options, signal, emit)
-        : await this.runLocal(index, label, task.task, cwd, resultPath, dispatch, options, signal, emit);
+        ? await this.runHerdr(index, label, task.task, cwd, resultPath, toolCallId, childDispatch, options, signal, emit)
+        : await this.runLocal(index, label, task.task, cwd, resultPath, childDispatch, options, signal, emit);
       emit({ status: result.status, paneId: result.paneId, tabId: result.tabId });
       return result;
     } catch (error) {

@@ -22,6 +22,10 @@ describe("extension", () => {
         execute: expect.any(Function),
       }),
     );
+    const tool = registerTool.mock.calls[0]![0] as any;
+    const effortSchema = tool.parameters.properties.tasks.items.properties.effort;
+    expect(effortSchema.enum).toEqual(["low", "medium", "high"]);
+    expect(effortSchema.description).toContain("thinking effort");
   });
 
   it("lists an empty retained fleet without invoking a process", async () => {

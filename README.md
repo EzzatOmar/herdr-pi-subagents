@@ -74,8 +74,8 @@ Pi should place independent tasks into one concurrent tool call. You can also in
 {
   "action": "run",
   "tasks": [
-    { "label": "auth review", "task": "Review authentication code for security defects. Do not edit files." },
-    { "label": "test gaps", "task": "Find important missing tests. Do not edit files." }
+    { "label": "auth review", "task": "Review authentication code for security defects. Do not edit files.", "effort": "high" },
+    { "label": "test gaps", "task": "Find important missing tests. Do not edit files.", "effort": "low" }
   ],
   "concurrency": 2,
   "timeoutSeconds": 900,
@@ -87,7 +87,7 @@ The result contains a section per child, in input order, with status, summary, a
 
 Run options:
 
-- `tasks`: 1–8 focused child assignments. Each accepts `task`, optional `label`, and optional `cwd`.
+- `tasks`: 1–8 focused child assignments. Each accepts `task`, optional `label`, optional `cwd`, and optional `effort` (`low`, `medium`, or `high`; use `medium`, not `mid`).
 - `concurrency`: simultaneous children, default 4 and maximum 8.
 - `timeoutSeconds`: per-child deadline, default 900 seconds.
 - `keepTabs`: retain successful Herdr tabs for inspection; defaults to `true` and has no effect on the local fallback.
@@ -148,7 +148,7 @@ The parent never scrapes terminal output. For Herdr children, a Pi session trans
 
 ## Model and working directory
 
-Children inherit the parent's selected `provider/model` and thinking level. Credentials stay in normal Pi auth/configuration and are not placed in prompts.
+Children inherit the parent's selected `provider/model` and thinking level. Set `effort` on an individual task to override the inherited thinking level with `low`, `medium`, or `high`; Pi applies the selected model's thinking capabilities. Credentials stay in normal Pi auth/configuration and are not placed in prompts.
 
 Each child has an isolated context and session, but tasks share their requested working directories. **Do not run overlapping edits concurrently.** Prefer concurrent agents for independent research/review tasks, or assign disjoint files/directories. Automatic worktree creation is not part of v1.
 

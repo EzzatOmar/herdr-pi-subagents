@@ -85,7 +85,7 @@ In child mode the extension does not expose the delegation tool (a recursion gua
 
 ### Inheritance and isolation
 
-Children inherit the parent's active `provider/model` and thinking level through CLI flags; credentials and normal Pi configuration remain process-level and are never copied into prompts. Each child has an isolated Pi session/context but shares the selected working directory. Concurrent write tasks can conflict, so tool guidance recommends parallel delegation for independent/research work and requires callers to separate editing scopes. Worktree creation is intentionally out of scope for v1.
+Children inherit the parent's active `provider/model` and thinking level through CLI flags; credentials and normal Pi configuration remain process-level and are never copied into prompts. A task may override the inherited thinking level with `effort: "low" | "medium" | "high"`; the extension translates this directly to Pi's `--thinking` flag for both local and Herdr children (`medium`, not `mid`). Each child has an isolated Pi session/context but shares the selected working directory. Concurrent write tasks can conflict, so tool guidance recommends parallel delegation for independent/research work and requires callers to separate editing scopes. Worktree creation is intentionally out of scope for v1.
 
 ### State, UI, and cleanup
 
@@ -121,6 +121,7 @@ Children inherit the parent's active `provider/model` and thinking level through
 - [x] Run typecheck/tests and fix all failures.
 - [x] Perform safe local, one-tab Herdr, and two-tab concurrent Herdr smoke tests; close every test-created tab.
 - [x] Finalize README and this work log with validation evidence and limitations.
+- [x] Add per-task low/medium/high effort overrides, tests, and documentation.
 
 ## Work log
 
@@ -138,3 +139,5 @@ Children inherit the parent's active `provider/model` and thinking level through
 - Used two real concurrent Herdr child reviewers against the implementation. Their actionable findings (abort races, duplicate kill timers, concurrent close state, failed-cleanup ownership, falsy JSON results, stale assistant extraction, gate validation, and result-file validation) were fixed and regression-tested.
 - Validation: `npm run check` passes strict TypeScript and 23 tests across 5 files. Tests cover child protocol, malformed/stale results, strict JSONL, abort/timeout, bounded local concurrency, Herdr no-focus creation, delayed shell readiness beyond the old 450 ms window, readiness-timeout cleanup, result collection, ownership-safe close, missing-context refusal, half-created cleanup, lost-response reconciliation, and extension registration.
 - Manual validation: one local child returned its summary; one Herdr child returned its summary and its test tab was closed; two simultaneous Herdr children each ran in their own tabs, returned ordered summaries, and both tabs were closed. After the shell-readiness fix, four simultaneous Herdr children all started, returned the expected summaries, and all four test tabs were closed. A title-marker smoke test observed `📋 1` on the waiting parent and `⏳ status marker smoke` on the active child, followed by restoration to `1` and child completion as `✅ status marker smoke`; the test tab was then closed. A package load smoke test (`pi -e . --list-models ...`) exited successfully, and `npm pack --dry-run` contains only the package runtime, README/license, and this research plan.
+- Requested enhancement: allow each task to select low, medium, or high model effort while retaining parent-level inheritance when omitted. The public field is `effort`; Pi's canonical middle level is `medium`, not `mid`.
+- Implemented the per-task `effort` schema and dispatch override for both local subprocess and Herdr-tab children. Updated prompt guidance and README examples, and verified explicit overrides plus inherited parent levels in both backends. Validation: `npm run check` passes strict TypeScript and all 23 tests across 5 files.

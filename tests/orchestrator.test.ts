@@ -26,11 +26,13 @@ describe("local orchestration", () => {
   it("runs with bounded concurrency and preserves input order", async () => {
     let active = 0;
     let maximum = 0;
+    const thinkingLevels = new Map<string, string>();
     const runner: ProcessRunner = async (request) => {
       active += 1;
       maximum = Math.max(maximum, active);
       const path = request.env!.HERDR_SUBAGENT_RESULT_FILE!;
       const task = request.args.at(-1)!;
+      thinkingLevels.set(task, request.args[request.args.indexOf("--thinking") + 1]!);
       await new Promise((resolve) => setTimeout(resolve, task.includes("first") ? 30 : 5));
       await writeFile(path, JSON.stringify(result(task.includes("first") ? "summary one" : "summary two")));
       active -= 1;
@@ -45,7 +47,7 @@ describe("local orchestration", () => {
     const batch = await orchestrator.runBatch(
       "call-1",
       [
-        { label: "one", task: "first task" },
+        { label: "one", task: "first task", effort: "low" },
         { label: "two", task: "second task" },
       ],
       { cwd: process.cwd(), model: "provider/model", thinkingLevel: "high" },
@@ -57,6 +59,8 @@ describe("local orchestration", () => {
     expect(batch.results.map((item) => item.label)).toEqual(["one", "two"]);
     expect(batch.results.map((item) => item.summary)).toEqual(["summary one", "summary two"]);
     expect(batch.results.every((item) => item.status === "completed")).toBe(true);
+    expect([...thinkingLevels.entries()].find(([prompt]) => prompt.includes("first task"))?.[1]).toBe("low");
+    expect([...thinkingLevels.entries()].find(([prompt]) => prompt.includes("second task"))?.[1]).toBe("high");
     expect(orchestrator.listFleet()).toEqual([]);
   });
 
@@ -156,7 +160,7 @@ describe("Herdr orchestration", () => {
     const batch = await orchestrator.runBatch(
       "call-abc",
       [
-        { label: "review", task: "review it" },
+        { label: "review", task: "review it", effort: "medium" },
         { label: "tests", task: "test it" },
       ],
       { cwd: process.cwd(), model: "openai/gpt", thinkingLevel: "high" },
@@ -172,6 +176,13 @@ describe("Herdr orchestration", () => {
       expect(args).toContain("w9");
       expect(args[args.indexOf("--label") + 1]).toMatch(/^⏳ /u);
     }
+    const starts = calls.filter((args) => args[0] === "agent" && args[1] === "start");
+    const effortFor = (label: string) => {
+      const args = starts.find((candidate) => candidate[candidate.indexOf("--name") + 1] === label)!;
+      return args[args.indexOf("--thinking") + 1];
+    };
+    expect(effortFor("review")).toBe("medium");
+    expect(effortFor("tests")).toBe("high");
     expect(calls.some((args) => args.join(" ") === "tab rename w9:parent 📋 parent work")).toBe(true);
     expect(calls.some((args) => args.join(" ") === "tab rename w9:parent parent work")).toBe(true);
     expect(calls.some((args) => args.join(" ") === "tab rename w9:t1 ✅ review")).toBe(true);

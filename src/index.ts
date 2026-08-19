@@ -17,6 +17,11 @@ const TaskSchema = Type.Object({
   task: Type.String({ minLength: 1, maxLength: 50_000, description: "Focused task for this child" }),
   label: Type.Optional(Type.String({ minLength: 1, maxLength: 80, description: "Herdr tab label" })),
   cwd: Type.Optional(Type.String({ minLength: 1, description: "Child cwd; defaults to the parent cwd" })),
+  effort: Type.Optional(
+    StringEnum(["low", "medium", "high"] as const, {
+      description: "Child thinking effort; defaults to the parent's current thinking level",
+    }),
+  ),
 });
 
 const SubagentSchema = Type.Object({
@@ -119,12 +124,14 @@ export default function herdrPiSubagents(pi: ExtensionAPI): void {
     description: [
       "Run up to 8 isolated Pi subagents and collect their final summaries.",
       "Under Herdr, every child is a visible no-focus tab in the current workspace; elsewhere each child is a local Pi subprocess.",
+      "Each task may set low, medium, or high thinking effort; otherwise it inherits the parent's current level.",
       "Use action=list or action=close to manage successful Herdr tabs retained after a run.",
     ].join(" "),
     promptSnippet: "Run concurrent isolated subagents and collect their summaries",
     promptGuidelines: [
       "Use subagent action=run for genuinely separable research, review, or implementation tasks that benefit from isolated context.",
       "Put multiple independent tasks in one subagent run call so they execute concurrently and their summaries are collected together.",
+      "Set a task's effort to low, medium, or high when it should differ from the parent's thinking level; use medium, not mid.",
       "Subagent children share their selected working directories; do not assign overlapping file edits concurrently.",
       "Under Herdr, successful tabs are retained by default for human inspection. After consuming their summaries, use subagent action=close with their tabIds, or omit tabIds to close all owned tabs.",
       "Use subagent action=list when you need the current retained fleet. The tool never lists or closes tabs it did not create.",

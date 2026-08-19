@@ -2,10 +2,13 @@ export const MAX_TASKS = 8;
 export const DEFAULT_CONCURRENCY = 4;
 export const MAX_SUMMARY_BYTES = 16 * 1024;
 
+export type SubagentEffort = "low" | "medium" | "high";
+
 export interface SubagentTask {
   task: string;
   label?: string;
   cwd?: string;
+  effort?: SubagentEffort;
 }
 
 export type ChildBackend = "herdr" | "local";
